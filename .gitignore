@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.DS_Store
+日报/
+日报_test/
+日报_test2/

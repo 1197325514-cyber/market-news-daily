@@ -107,7 +107,7 @@ def create_report_template(
     template = f"""# {today} 全市场综合早报
 
 > 生成时间：{now_time}（{timezone}）
-> 数据来源：ddg-search + fetch4ai
+> 数据来源：ddg-search + fetch4ai + stock-price-query / stock-info-explorer
 
 ---
 

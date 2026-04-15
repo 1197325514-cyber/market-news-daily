@@ -33,6 +33,7 @@ DEFAULT_OUTPUT_DIR = Path("data")
 ALLOWED_SOURCES = ("stock-price-query", "stock-info-explorer")
 MAX_STALE_HOURS = 72
 CROSS_CHECK_MAX_GAP_PCT = 0.5
+MAX_ABS_PCT_CHANGE = 30.0
 
 # 必须获取的基准资产池
 REQUIRED_ASSETS = [
@@ -338,6 +339,10 @@ def _validate_quote(asset: Dict[str, Any], parsed: Dict[str, Any], now_utc: date
             errors.append(
                 f"涨跌幅不一致：字段值 {pct:.4f}%，按 close/prev 推导 {derived_pct:.4f}%"
             )
+    if pct is not None and abs(pct) > MAX_ABS_PCT_CHANGE:
+        errors.append(
+            f"触发极值熔断：涨跌幅 {pct:.4f}% 超过 {MAX_ABS_PCT_CHANGE:.1f}%（疑似错码/复权异常/API错误）"
+        )
     if prev is not None and chg is not None:
         derived_chg = close - prev
         if abs(derived_chg - chg) > max(0.01, abs(chg) * 0.1):

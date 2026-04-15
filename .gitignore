@@ -4,3 +4,5 @@ __pycache__/
 日报/
 日报_test/
 日报_test2/
+data/
+*.json

@@ -42,7 +42,16 @@ compatibility: Python 3.8+，依赖 ddg-search、fetch4ai 以及 stock-price-que
 - `GC=F`（COMEX黄金期货，伦敦金现代理）
 
 **原始返回保存（Evidence Chain）**：
-每次工具调用后，**必须将原始返回结果原封不动保存为 JSON 文件**：
+每次工具调用后，**必须将原始返回结果原封不动保存为 JSON 文件**。建议采用下列封装格式，避免“看似有文件，实则不可验证”：
+```json
+{
+  "source_tool": "stock-price-query",
+  "query_ticker": "^DJI",
+  "fetched_at": "2026-04-16T08:01:12+08:00",
+  "raw": { "..." : "原始返回完整内容" }
+}
+```
+并保存为：
 ```
 data/raw_stock_000001.SS.json
 data/raw_stock_399001.SZ.json
@@ -52,7 +61,7 @@ data/raw_stock_^IXIC.json
 data/raw_stock_BZ=F.json
 data/raw_stock_GC=F.json
 ```
-*注意：若文件名含特殊字符导致系统写入困难，可用 `raw_stock_{ticker替换斜杠为减号}.json` 的等价形式。*
+*注意：若文件名含特殊字符，可用 `raw_stock_{ticker安全化}.json` 等价形式，但 JSON 内部的 `query_ticker/symbol` 必须保留原始代码。*
 
 #### 2.3 数据源交叉核对（强制）
 对于美股关键指数 `^DJI` 和 `^IXIC`，在调用 `stock-price-query` 后，**必须额外调用 `stock-info-explorer` 进行二次核对**。将第二次返回保存为：
@@ -60,16 +69,16 @@ data/raw_stock_GC=F.json
 data/raw_stock2_^DJI.json
 data/raw_stock2_^IXIC.json
 ```
-- 若两次查询的涨跌幅差异 **> 0.5%**，必须在最终报告中标注**“数据存在口径差异”**，并以 `stock-price-query` 结果为准。
-- 若 `stock-info-explorer` 调用失败，不影响主流程，但需在 `data/market_data_*.md` 的备注中注明“交叉验证源获取失败”。
+- 若两次查询价格差异 **> 0.5%**，视为**交叉验证失败**，必须停止日报生成并重新拉取数据。
+- `stock-info-explorer` 调用失败时，`^DJI`/`^IXIC` 视为未完成验证，**不得继续主流程**。
 
 #### 2.4 硬门禁验证脚本（必须运行）
 在完成 2.2（及 2.3）的文件保存后，**必须立即运行**：
 ```bash
 python scripts/fetch_market_data.py --date {YYYY-MM-DD}
 ```
-- 该脚本会检查所有 `data/raw_stock_*.json` 是否存在、非空、且包含可解析的收盘价。
-- **若脚本返回非零退出码**：说明存在缺失或格式错误的资产数据。此时必须：
+- 该脚本会执行真实性门禁：来源字段、标的代码匹配、时间戳新鲜度、价格区间、涨跌逻辑一致性，以及 `^DJI`/`^IXIC` 双源差异阈值。
+- **若脚本返回非零退出码**：说明存在真实性风险（缺失、伪造、过期、错码、跨源冲突等）。此时必须：
   1. 检查缺失原因；
   2. 重新调用对应行情工具补全 JSON 文件；
   3. 重新运行验证脚本，直至通过。
@@ -79,8 +88,9 @@ python scripts/fetch_market_data.py --date {YYYY-MM-DD}
 验证脚本通过后，会生成：
 ```
 data/market_data_{YYYY-MM-DD}.md
+data/market_data_{YYYY-MM-DD}.json
 ```
-**后续撰写“核心资产与市场异动”模块时，只能使用该文件中的数字**。若某项状态为 `API暂无数据`，日报中必须原样写 `API暂无数据`，**绝不允许捏造**。
+**后续撰写“核心资产与市场异动”模块时，只能使用该文件中的数字**。若脚本输出中出现 `BLOCKED` 状态，说明真实性门禁失败，必须先修复数据，不得生成日报。
 
 #### 2.6 时区与交易日说明（北京时间 08:00 报告专用）
 - 时间窗口为过去 24 小时（昨日 08:00 – 今日 08:00）。
@@ -325,7 +335,7 @@ python scripts/save_report.py --stdin --output-dir 日报 --timezone Asia/Shangh
 ## 异常处理策略
 - `ddg-search` 结果稀少：放宽关键词（去掉来源词，保留主题词 + 时效词）
 - `fetch4ai` 多次失败：记录失败来源并替换备选链接
-- 行情接口无数据：标注"API暂无数据"，禁止用搜索引擎旧闻替代真实行情
+- 行情接口返回缺失/异常：立即中止日报生成并重跑行情拉取与门禁验证，禁止用搜索引擎旧闻或历史记忆补数
 - 链接无法访问或打开后内容与标题不符：立即弃用并换备选来源，**不得在报告中保留死链；若无可用的备选验证链接，宁可删除该条新闻的链接**
 - 最终报告强制清零 404：输出前必须逐条确认所有链接均通过 `fetch4ai` 验证
 - 网络抖动：最多 2 次重试，仍失败则在日报中透明说明“部分链接抓取失败”
@@ -343,7 +353,8 @@ python scripts/save_report.py --stdin --output-dir 日报 --timezone Asia/Shangh
 - [ ] 对不确定内容做了明确标注
 - [ ] 前四大模块每条深度新闻都包含“背景/详述/传导”三段
 - [ ] 核心资产模块体现了期货/大宗商品分析维度
-- [ ] 核心资产模块的价格与涨跌幅数据 100% 来源于 `data/market_data_{YYYY-MM-DD}.md`（已通过 `fetch_market_data.py` 硬门禁），缺失时已明确标注
+- [ ] 核心资产模块的价格与涨跌幅数据 100% 来源于 `data/market_data_{YYYY-MM-DD}.md/.json`（已通过 `fetch_market_data.py` 真实性门禁）
+- [ ] `^DJI` 与 `^IXIC` 已完成 `stock-price-query` 与 `stock-info-explorer` 双源交叉，且差异 <= 0.5%
 - [ ] 至少覆盖 3-5 家顶级机构，且 GS / MS / DB 为必检保底
 - [ ] 每家机构包含 Core Thesis / Forecasts / Logic / Actionable Strategy
 - [ ] 深度条目为 5-8 条，快讯条目 >= 15 条，新闻总条数 >= 20 条

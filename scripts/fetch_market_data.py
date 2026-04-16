@@ -296,6 +296,30 @@ def _parse_raw_json(path: Path) -> Dict[str, Any]:
     }
 
 
+def _check_time_paradox(ticker: str, ts: datetime, now_utc: datetime) -> Optional[str]:
+    """基于当前系统时间检测明显的时间悖论（伪造数据特征）。"""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    ts_utc = ts.astimezone(timezone.utc)
+    delta = now_utc - ts_utc
+
+    # 任何未来时间都是红线
+    if delta < timedelta(minutes=-5):
+        # 给出更具体的伪造判定
+        bj_now = now_utc.astimezone(timezone(timedelta(hours=8)))
+        est_now = now_utc.astimezone(timezone(timedelta(hours=-4)))  # 简化用EDT
+        if ticker in ("000001.SS", "399001.SZ"):
+            ts_bj = ts_utc.astimezone(timezone(timedelta(hours=8)))
+            if ts_bj.hour == 15:
+                return f"时间悖论/伪造判定：A股数据标为 {ts_bj.strftime('%Y-%m-%d %H:%M')} CST，但当前北京时间仅 {bj_now.strftime('%Y-%m-%d %H:%M')}，A股尚未收盘"
+        if ticker in ("^DJI", "^IXIC"):
+            ts_est = ts_utc.astimezone(timezone(timedelta(hours=-4)))
+            if ts_est.hour >= 16:
+                return f"时间悖论/伪造判定：美股数据标为 {ts_est.strftime('%Y-%m-%d %H:%M')} EDT，但当前美东时间仅 {est_now.strftime('%Y-%m-%d %H:%M')}，美股尚未收盘"
+        return "时间戳在未来，疑似伪造或时区错误"
+    return None
+
+
 def _validate_quote(asset: Dict[str, Any], parsed: Dict[str, Any], now_utc: datetime) -> Tuple[Optional[ParsedQuote], List[str]]:
     errors: List[str] = []
     ticker = asset["ticker"]
@@ -318,13 +342,15 @@ def _validate_quote(asset: Dict[str, Any], parsed: Dict[str, Any], now_utc: date
         )
 
     ts: datetime = parsed["timestamp"]
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    delta = now_utc - ts.astimezone(timezone.utc)
-    if delta < timedelta(minutes=-5):
-        errors.append("时间戳在未来，疑似伪造或时区错误")
-    if delta > timedelta(hours=MAX_STALE_HOURS):
-        errors.append(f"时间戳过旧（>{MAX_STALE_HOURS}h），不允许写入日报")
+    paradox_err = _check_time_paradox(ticker, ts, now_utc)
+    if paradox_err:
+        errors.append(paradox_err)
+    else:
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        delta = now_utc - ts.astimezone(timezone.utc)
+        if delta > timedelta(hours=MAX_STALE_HOURS):
+            errors.append(f"时间戳过旧（>{MAX_STALE_HOURS}h），不允许写入日报")
 
     source = parsed["source"]
     if source not in ALLOWED_SOURCES:

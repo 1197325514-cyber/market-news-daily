@@ -35,6 +35,71 @@ MAX_STALE_HOURS = 72
 CROSS_CHECK_MAX_GAP_PCT = 0.5
 MAX_ABS_PCT_CHANGE = 30.0
 
+
+def _clean_old_files(input_dir: Path) -> None:
+    """删除旧的 raw_stock_*.json，防止缓存污染导致读取历史错误数据。"""
+    if not input_dir.exists():
+        return
+    for p in input_dir.glob("raw_stock*.json"):
+        try:
+            p.unlink()
+            print(f"[CLEAN] 已清理旧缓存：{p.name}")
+        except Exception as exc:
+            print(f"[WARN] 清理失败 {p.name}: {exc}")
+
+
+def _check_report_date(ticker: str, ts: datetime, report_date_str: str, asset_tz: str) -> Optional[str]:
+    """检测 timestamp 是否对齐报告日期的物理交易日定义。"""
+    from datetime import date
+    report_date = date.fromisoformat(report_date_str)
+    ts_local = ts.astimezone(timezone.utc)
+    # 根据资产时区做偏移近似（不用 ZoneInfo 保持兼容性）
+    tz_offsets = {
+        "Asia/Shanghai": 8,
+        "Asia/Hong_Kong": 8,
+        "America/New_York": -4,  # EDT 简化；冬令时-5，误差在允许范围内
+        "Europe/London": 1,
+    }
+    offset_hours = tz_offsets.get(asset_tz, 0)
+    ts_asset = ts_local + timedelta(hours=offset_hours)
+    actual_date = ts_asset.date()
+
+    if ticker in ("000001.SS", "399001.SZ", "^HSI"):
+        # A股/港股：收盘日期必须是 report_date 当天
+        if actual_date != report_date:
+            return (
+                f"日期对齐失败：{ticker} 收盘日期为 {actual_date}，"
+                f"但报告要求 {report_date} 的收盘数据"
+            )
+
+    elif ticker in ("^DJI", "^IXIC"):
+        # 美股：北京时间 report_date 早8点时，最新收盘是北京时间 report_date 凌晨（美东 report_date-1）
+        expected = report_date - timedelta(days=1)
+        if actual_date != expected:
+            return (
+                f"日期对齐失败：{ticker} 数据日期为 {actual_date}（美东），"
+                f"但报告要求 {expected}（对应北京时间 {report_date} 凌晨收盘）"
+            )
+
+    elif ticker == "BZ=F":
+        # 布伦特原油：主要参考伦敦收盘，允许 report_date 或 report_date-1
+        if actual_date not in (report_date, report_date - timedelta(days=1)):
+            return (
+                f"日期对齐失败：{ticker} 数据日期为 {actual_date}，"
+                f"与报告日期 {report_date} 偏差超过1天"
+            )
+
+    elif ticker == "GC=F":
+        # COMEX黄金：美东收盘，对应北京时间 report_date 凌晨，应为 report_date-1
+        expected = report_date - timedelta(days=1)
+        if actual_date != expected:
+            return (
+                f"日期对齐失败：{ticker} 数据日期为 {actual_date}（美东），"
+                f"但报告要求 {expected}（对应北京时间 {report_date} 凌晨收盘）"
+            )
+
+    return None
+
 # 必须获取的基准资产池
 REQUIRED_ASSETS = [
     {
@@ -320,7 +385,7 @@ def _check_time_paradox(ticker: str, ts: datetime, now_utc: datetime) -> Optiona
     return None
 
 
-def _validate_quote(asset: Dict[str, Any], parsed: Dict[str, Any], now_utc: datetime) -> Tuple[Optional[ParsedQuote], List[str]]:
+def _validate_quote(asset: Dict[str, Any], parsed: Dict[str, Any], now_utc: datetime, report_date_str: str) -> Tuple[Optional[ParsedQuote], List[str]]:
     errors: List[str] = []
     ticker = asset["ticker"]
     accepted = {_norm_symbol(x) for x in asset["accepted"]}
@@ -351,6 +416,10 @@ def _validate_quote(asset: Dict[str, Any], parsed: Dict[str, Any], now_utc: date
         delta = now_utc - ts.astimezone(timezone.utc)
         if delta > timedelta(hours=MAX_STALE_HOURS):
             errors.append(f"时间戳过旧（>{MAX_STALE_HOURS}h），不允许写入日报")
+
+    date_align_err = _check_report_date(ticker, ts, report_date_str, asset["tz"])
+    if date_align_err:
+        errors.append(date_align_err)
 
     source = parsed["source"]
     if source not in ALLOWED_SOURCES:
@@ -402,10 +471,13 @@ def _compare_quotes(primary: ParsedQuote, secondary: ParsedQuote) -> Tuple[bool,
     return True, f"交叉验证通过：双源价格差 {gap_pct:.3f}%"
 
 
-def validate_and_generate(date_str: str, input_dir: Path, output_dir: Path) -> int:
+def validate_and_generate(date_str: str, input_dir: Path, output_dir: Path, clean: bool = True) -> int:
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if clean:
+        _clean_old_files(input_dir)
 
     errors: List[str] = []
     records: List[Dict[str, Any]] = []
@@ -427,7 +499,7 @@ def validate_and_generate(date_str: str, input_dir: Path, output_dir: Path) -> i
             records.append({"ticker": ticker, "name": asset["name"], "status": "BLOCKED", "errors": [err]})
             continue
 
-        primary, errs = _validate_quote(asset, parsed, now_utc)
+        primary, errs = _validate_quote(asset, parsed, now_utc, date_str)
         if errs:
             errors.extend([f"{ticker}: {x}" for x in errs])
             records.append({"ticker": ticker, "name": asset["name"], "status": "BLOCKED", "errors": errs})
@@ -447,7 +519,7 @@ def validate_and_generate(date_str: str, input_dir: Path, output_dir: Path) -> i
                 errors.append(err)
                 records.append({"ticker": ticker, "name": asset["name"], "status": "BLOCKED", "errors": [err]})
                 continue
-            secondary, second_errs = _validate_quote(asset, second_parsed, now_utc)
+            secondary, second_errs = _validate_quote(asset, second_parsed, now_utc, date_str)
             if second_errs:
                 errors.extend([f"{ticker}(cross): {x}" for x in second_errs])
                 records.append({"ticker": ticker, "name": asset["name"], "status": "BLOCKED", "errors": second_errs})
@@ -565,9 +637,15 @@ def main() -> int:
     parser.add_argument("--date", required=True, help="日期格式 YYYY-MM-DD")
     parser.add_argument("--input-dir", default=str(DEFAULT_INPUT_DIR), help="原始 JSON 文件目录")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="输出 Markdown 目录")
+    parser.add_argument("--no-clean", action="store_true", help="保留旧的 raw_stock_*.json（不推荐，仅调试使用）")
     args = parser.parse_args()
 
-    return validate_and_generate(args.date, Path(args.input_dir), Path(args.output_dir))
+    return validate_and_generate(
+        args.date,
+        Path(args.input_dir),
+        Path(args.output_dir),
+        clean=not args.no_clean,
+    )
 
 
 if __name__ == "__main__":

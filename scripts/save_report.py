@@ -6,6 +6,7 @@
 
 import argparse
 import os
+import re
 import sys
 import tempfile
 from datetime import datetime
@@ -33,17 +34,18 @@ def _resolve_report_path(
     output_dir: str,
     report_date: str,
     overwrite: bool,
+    extension: str = ".md",
 ) -> Path:
     base_dir = Path(output_dir)
     base_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = f"{report_date}_全市场综合早报.md"
+    filename = f"{report_date}_全市场综合早报{extension}"
     target = base_dir / filename
     if overwrite or not target.exists():
         return target
 
     suffix = _now().strftime("%H%M%S")
-    return base_dir / f"{report_date}_全市场综合早报_{suffix}.md"
+    return base_dir / f"{report_date}_全市场综合早报_{suffix}{extension}"
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -56,6 +58,21 @@ def _atomic_write(path: Path, content: str) -> None:
         tmp.write(content)
         tmp_path = Path(tmp.name)
     os.replace(tmp_path, path)
+
+
+def validate_markdown_structure(content: str) -> bool:
+    """
+    检查日报结构是否完整。
+    """
+    required_headers = [
+        r"## 一、宏观经济与政策",
+        r"## 三、核心资产与市场异动",
+        r"## 六、全市场广度扫雷（快讯）",
+    ]
+    for header in required_headers:
+        if not re.search(header, content):
+            return False
+    return True
 
 
 def save_markdown_report(
@@ -82,9 +99,14 @@ def save_markdown_report(
     if not cleaned:
         raise ValueError("日报内容为空，未执行保存。")
 
+    extension = ".md"
+    if not validate_markdown_structure(cleaned):
+        print("⚠️ 警告：检测到日报结构不完整，已降级保存为 .draft.md", file=sys.stderr)
+        extension = ".draft.md"
+
     current = _now(timezone)
     date_text = report_date or current.strftime("%Y-%m-%d")
-    target = _resolve_report_path(output_dir, date_text, overwrite)
+    target = _resolve_report_path(output_dir, date_text, overwrite, extension=extension)
     _atomic_write(target, cleaned + "\n")
 
     return str(target.resolve())
@@ -107,7 +129,7 @@ def create_report_template(
     template = f"""# {today} 全市场综合早报
 
 > 生成时间：{now_time}（{timezone}）
-> 数据来源：ddg-search + fetch4ai + stock-price-query / stock-info-explorer
+> 数据来源：crawl4ai + 中文财经媒体交叉验证 + stock-price-query / stock-info-explorer
 
 ---
 
@@ -135,11 +157,24 @@ def create_report_template(
 
 ---
 
+## 五、顶级机构投研追踪与深度研判
+
+### 今日暂无重大动态
+
+---
+
+## 六、全市场广度扫雷（快讯）
+
+- **[宏观]** 事件事实：今日暂无重大动态；市场影响：暂无。 [原文链接](N/A)
+
+---
+
 ## 今日概览
 - 宏观：今日暂无重大动态
 - 地缘：今日暂无重大动态
 - 市场：今日暂无重大动态
 - 技术：今日暂无重大动态
+- 机构：今日暂无重大动态
 """
     return template
 
